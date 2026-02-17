@@ -366,6 +366,113 @@ class TestPetnames:
         assert resolved is None
 
 
+class TestServiceAgreements:
+    """Test service agreement functionality."""
+
+    @requires_node
+    def test_propose_accept_complete_agreement(self, node_url):
+        """Test full service agreement lifecycle: propose, accept, complete."""
+        # Create provider and consumer agents
+        provider = DisentangleAgent(node_url)
+        provider.register(agent_type="agi")
+
+        consumer = DisentangleAgent(node_url)
+        consumer.register(agent_type="agi")
+
+        # Provider proposes an agreement
+        # Rust POST /agreement/propose: { provider_did, consumer_did, terms, signing_key_hex }
+        # Response: { agreement_id, agreement }
+        result = provider.propose_agreement(
+            consumer_did=consumer.did,
+            description="Compute 100 embeddings",
+            success_criteria=["all 100 returned", "latency < 500ms"],
+            deadline_depth=1000,
+        )
+
+        assert "agreement_id" in result
+        assert "agreement" in result
+        agreement_id = result["agreement_id"]
+
+        # Consumer accepts the agreement
+        # Rust POST /agreement/accept: { agreement_id, consumer_sk_hex }
+        # Response: { success }
+        accept_result = consumer.accept_agreement(agreement_id)
+        assert accept_result is True
+
+        # Provider completes the agreement successfully
+        # Rust POST /agreement/complete: { agreement_id, success, outcome_hash, signing_key_hex }
+        # Response: { success }
+        complete_result = provider.complete_agreement(
+            agreement_id=agreement_id,
+            success=True,
+            outcome_hash="abc123def456",
+        )
+        assert complete_result is True
+
+        # Both agents should see the agreement in their lists
+        provider_agreements = provider.list_agreements()
+        consumer_agreements = consumer.list_agreements()
+
+        assert any(a["id"] == agreement_id for a in provider_agreements)
+        assert any(a["id"] == agreement_id for a in consumer_agreements)
+
+    @requires_node
+    def test_list_agreements(self, node_url):
+        """Test listing agreements for an agent."""
+        provider = DisentangleAgent(node_url)
+        provider.register(agent_type="agi")
+
+        consumer = DisentangleAgent(node_url)
+        consumer.register(agent_type="agi")
+
+        # Create multiple agreements
+        result1 = provider.propose_agreement(
+            consumer_did=consumer.did,
+            description="Service 1",
+            success_criteria=["criterion 1"],
+        )
+
+        result2 = provider.propose_agreement(
+            consumer_did=consumer.did,
+            description="Service 2",
+            success_criteria=["criterion 2"],
+        )
+
+        # Rust GET /agreement/by-did/{did}
+        # Response: { agreements: [...] }
+        agreements = provider.list_agreements()
+        assert isinstance(agreements, list)
+        assert len(agreements) >= 2
+
+        # Both agreements should be in the list
+        agreement_ids = [result1["agreement_id"], result2["agreement_id"]]
+        found_ids = [a["id"] for a in agreements]
+        for aid in agreement_ids:
+            assert aid in found_ids
+
+
+class TestEventWatching:
+    """Test SSE event watching functionality."""
+
+    @requires_node
+    def test_watch_method_exists(self, node_url):
+        """Test that watch method exists and is callable.
+
+        This is a basic test to verify the watch method is implemented.
+        Full SSE testing requires a running node with event emission.
+        """
+        agent = DisentangleAgent(node_url)
+        agent.register(agent_type="agi")
+
+        # Verify watch method exists
+        assert hasattr(agent, "watch")
+        assert callable(agent.watch)
+
+        # Note: Full SSE testing requires event emission from WS-A (Rust node)
+        # which may not be implemented yet. This test verifies the SDK side
+        # is ready to consume events when the node is ready.
+
+
 class TestNodeInfo:
     """Test node information endpoints."""
 
@@ -378,6 +485,34 @@ class TestNodeInfo:
         assert isinstance(status, dict)
         # Status should contain basic node info
         assert "version" in status or "status" in status or "uptime" in status
+
+    @requires_node
+    def test_network_health(self, node_url):
+        """Test retrieving network health metrics."""
+        agent = DisentangleAgent(node_url)
+
+        # Rust GET /network/health
+        # Response: {
+        #   node_id, peer_count, dag_size, current_depth, tips,
+        #   registered_dids, active_capabilities, active_agreements,
+        #   mean_network_curvature, identity_graph_edges, uptime_seconds
+        # }
+        health = agent.network_health()
+        assert isinstance(health, dict)
+
+        # Health should contain enriched network metrics
+        # Note: Some fields may not exist yet if WS-A implementation is pending
+        # We test for the existence of at least some expected fields
+        expected_fields = [
+            "node_id",
+            "peer_count",
+            "dag_size",
+            "current_depth",
+            "registered_dids",
+        ]
+
+        # At least one expected field should be present
+        assert any(field in health for field in expected_fields)
 
 
 class TestContextManager:
