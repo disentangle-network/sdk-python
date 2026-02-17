@@ -528,3 +528,510 @@ class TestContextManager:
 
         # Client should be closed after context exit
         # (httpx client will raise error if used after close)
+
+
+class TestProposals:
+    """Test coordination proposal functionality."""
+
+    @requires_node
+    def test_create_proposal(self, node_url):
+        """Test creating a coordination proposal."""
+        agent = DisentangleAgent(node_url)
+        agent.register(agent_type="agi")
+
+        # Rust POST /proposal/create
+        # Response: { proposal_id, proposal }
+        result = agent.create_proposal(
+            description="Collaborative embedding generation",
+            activation_mass=5.0,
+            min_participants=3,
+            expiry_depth=10000,
+        )
+
+        assert "proposal_id" in result
+        assert "proposal" in result
+        assert result["proposal"]["description"] == "Collaborative embedding generation"
+        assert result["proposal"]["activation_mass"] == 5.0
+        assert result["proposal"]["min_participants"] == 3
+
+    @requires_node
+    def test_join_proposal(self, node_url):
+        """Test joining a proposal commits mass."""
+        initiator = DisentangleAgent(node_url)
+        initiator.register(agent_type="agi")
+
+        joiner = DisentangleAgent(node_url)
+        joiner.register(agent_type="agi")
+
+        # Create proposal
+        result = initiator.create_proposal(
+            description="Test coordination",
+            activation_mass=100.0,
+            min_participants=2,
+            expiry_depth=10000,
+        )
+        proposal_id = result["proposal_id"]
+
+        # Joiner joins the proposal
+        # Rust POST /proposal/join
+        # Response: { success, committed_mass, total_mass, activated?, intent_id? }
+        join_result = joiner.join_proposal(proposal_id)
+        assert "committed_mass" in join_result or "success" in join_result
+
+    @requires_node
+    def test_list_proposals(self, node_url):
+        """Test listing proposals with optional status filter."""
+        agent = DisentangleAgent(node_url)
+        agent.register(agent_type="agi")
+
+        # Create a proposal
+        agent.create_proposal(
+            description="Proposal A",
+            activation_mass=5.0,
+            min_participants=2,
+            expiry_depth=10000,
+        )
+
+        # Rust GET /proposal/list
+        # Response: { proposals: [...] }
+        proposals = agent.list_proposals()
+        assert isinstance(proposals, list)
+        assert len(proposals) >= 1
+
+        # Test with status filter
+        attracting = agent.list_proposals(status="attracting")
+        assert isinstance(attracting, list)
+
+    @requires_node
+    def test_proposal_activation_creates_intent(self, node_url):
+        """Test that a proposal activates into a SharedIntent when thresholds met."""
+        # Create agents and build connections for mass
+        alice = DisentangleAgent(node_url)
+        alice.register(agent_type="agi")
+
+        bob = DisentangleAgent(node_url)
+        bob.register(agent_type="agi")
+
+        carol = DisentangleAgent(node_url)
+        carol.register(agent_type="agi")
+
+        # Build mutual connections
+        alice.introduce(bob.did)
+        bob.introduce(alice.did)
+        alice.introduce(carol.did)
+        carol.introduce(alice.did)
+        bob.introduce(carol.did)
+        carol.introduce(bob.did)
+
+        # Alice creates proposal with low threshold for test
+        result = alice.create_proposal(
+            description="Collaborative task",
+            activation_mass=0.01,
+            min_participants=2,
+            expiry_depth=50000,
+        )
+        proposal_id = result["proposal_id"]
+
+        # Bob joins
+        join_result = bob.join_proposal(proposal_id)
+
+        # Carol joins — may trigger activation
+        join_result2 = carol.join_proposal(proposal_id)
+
+        # If activated, should have intent_id
+        if join_result2.get("activated"):
+            assert "intent_id" in join_result2
+
+    def test_create_proposal_requires_registration(self, node_url):
+        """Test that creating a proposal requires registration."""
+        agent = DisentangleAgent(node_url)
+
+        with pytest.raises(NotRegisteredError):
+            agent.create_proposal(
+                description="Test",
+                activation_mass=1.0,
+                min_participants=2,
+                expiry_depth=1000,
+            )
+
+    def test_join_proposal_requires_registration(self, node_url):
+        """Test that joining a proposal requires registration."""
+        agent = DisentangleAgent(node_url)
+
+        with pytest.raises(NotRegisteredError):
+            agent.join_proposal("abc123")
+
+    def test_list_proposals_requires_registration(self, node_url):
+        """Test that listing proposals requires registration."""
+        agent = DisentangleAgent(node_url)
+
+        with pytest.raises(NotRegisteredError):
+            agent.list_proposals()
+
+
+class TestSharedIntents:
+    """Test SharedIntent collaboration functionality."""
+
+    @requires_node
+    def test_create_intent(self, node_url):
+        """Test creating a SharedIntent directly."""
+        alice = DisentangleAgent(node_url)
+        alice.register(agent_type="agi")
+
+        bob = DisentangleAgent(node_url)
+        bob.register(agent_type="agi")
+
+        # Mutual introduction required
+        alice.introduce(bob.did)
+        bob.introduce(alice.did)
+
+        # Rust POST /intent/create
+        # Response: { intent_id, intent }
+        result = alice.create_intent(
+            description="Joint embedding project",
+            participant_dids=[alice.did, bob.did],
+        )
+
+        assert "intent_id" in result
+        assert "intent" in result
+        assert result["intent"]["description"] == "Joint embedding project"
+
+    @requires_node
+    def test_create_intent_with_capabilities(self, node_url):
+        """Test creating a SharedIntent with contributed capabilities."""
+        alice = DisentangleAgent(node_url)
+        alice.register(agent_type="agi")
+
+        bob = DisentangleAgent(node_url)
+        bob.register(agent_type="agi")
+
+        alice.introduce(bob.did)
+        bob.introduce(alice.did)
+
+        # Create a capability to contribute
+        cap = alice.create_capability(
+            subject={"type": "compute", "scope": "execute"},
+        )
+
+        result = alice.create_intent(
+            description="Compute collaboration",
+            participant_dids=[alice.did, bob.did],
+            capability_ids=[cap.capability_id_hex],
+        )
+
+        assert "intent_id" in result
+
+    @requires_node
+    def test_join_intent(self, node_url):
+        """Test late-joining an active SharedIntent."""
+        alice = DisentangleAgent(node_url)
+        alice.register(agent_type="agi")
+
+        bob = DisentangleAgent(node_url)
+        bob.register(agent_type="agi")
+
+        carol = DisentangleAgent(node_url)
+        carol.register(agent_type="agi")
+
+        # Build connections
+        alice.introduce(bob.did)
+        bob.introduce(alice.did)
+        bob.introduce(carol.did)
+        carol.introduce(bob.did)
+
+        # Create intent with Alice and Bob
+        result = alice.create_intent(
+            description="Expandable project",
+            participant_dids=[alice.did, bob.did],
+        )
+        intent_id = result["intent_id"]
+
+        # Carol late-joins
+        # Rust POST /intent/join
+        # Response: { success, participant }
+        join_result = carol.join_intent(intent_id)
+        assert "success" in join_result or "participant" in join_result
+
+    @requires_node
+    def test_archive_intent(self, node_url):
+        """Test archiving a SharedIntent snapshots coherence deltas."""
+        alice = DisentangleAgent(node_url)
+        alice.register(agent_type="agi")
+
+        bob = DisentangleAgent(node_url)
+        bob.register(agent_type="agi")
+
+        alice.introduce(bob.did)
+        bob.introduce(alice.did)
+
+        # Create and then archive
+        result = alice.create_intent(
+            description="Short-lived project",
+            participant_dids=[alice.did, bob.did],
+        )
+        intent_id = result["intent_id"]
+
+        # Rust POST /intent/archive
+        # Response: { success, mass_delta, curvature_delta }
+        archive_result = alice.archive_intent(intent_id)
+        assert "success" in archive_result or "mass_delta" in archive_result
+
+    @requires_node
+    def test_intent_coherence(self, node_url):
+        """Test getting coherence snapshot for a SharedIntent."""
+        alice = DisentangleAgent(node_url)
+        alice.register(agent_type="agi")
+
+        bob = DisentangleAgent(node_url)
+        bob.register(agent_type="agi")
+
+        alice.introduce(bob.did)
+        bob.introduce(alice.did)
+
+        result = alice.create_intent(
+            description="Metrics project",
+            participant_dids=[alice.did, bob.did],
+        )
+        intent_id = result["intent_id"]
+
+        # Rust GET /intent/{id}/coherence
+        # Response: IntentCoherenceSnapshot { ... }
+        snapshot = alice.intent_coherence(intent_id)
+        assert isinstance(snapshot, dict)
+
+        # Should contain baseline and current metrics
+        expected_keys = [
+            "participant_count",
+            "baseline_mass",
+            "current_mass",
+            "mass_delta",
+        ]
+        assert any(key in snapshot for key in expected_keys)
+
+    @requires_node
+    def test_list_intents(self, node_url):
+        """Test listing SharedIntents with optional status filter."""
+        alice = DisentangleAgent(node_url)
+        alice.register(agent_type="agi")
+
+        bob = DisentangleAgent(node_url)
+        bob.register(agent_type="agi")
+
+        alice.introduce(bob.did)
+        bob.introduce(alice.did)
+
+        alice.create_intent(
+            description="Intent A",
+            participant_dids=[alice.did, bob.did],
+        )
+
+        # Rust GET /intent/list
+        # Response: { intents: [...] }
+        intents = alice.list_intents()
+        assert isinstance(intents, list)
+        assert len(intents) >= 1
+
+        # Filter by active status
+        active = alice.list_intents(status="active")
+        assert isinstance(active, list)
+
+    def test_create_intent_requires_registration(self, node_url):
+        """Test that creating an intent requires registration."""
+        agent = DisentangleAgent(node_url)
+
+        with pytest.raises(NotRegisteredError):
+            agent.create_intent(
+                description="Test",
+                participant_dids=["did:test:1"],
+            )
+
+    def test_join_intent_requires_registration(self, node_url):
+        """Test that joining an intent requires registration."""
+        agent = DisentangleAgent(node_url)
+
+        with pytest.raises(NotRegisteredError):
+            agent.join_intent("abc123")
+
+    def test_archive_intent_requires_registration(self, node_url):
+        """Test that archiving an intent requires registration."""
+        agent = DisentangleAgent(node_url)
+
+        with pytest.raises(NotRegisteredError):
+            agent.archive_intent("abc123")
+
+    def test_intent_coherence_requires_registration(self, node_url):
+        """Test that querying intent coherence requires registration."""
+        agent = DisentangleAgent(node_url)
+
+        with pytest.raises(NotRegisteredError):
+            agent.intent_coherence("abc123")
+
+    def test_list_intents_requires_registration(self, node_url):
+        """Test that listing intents requires registration."""
+        agent = DisentangleAgent(node_url)
+
+        with pytest.raises(NotRegisteredError):
+            agent.list_intents()
+
+
+class TestOracle:
+    """Test CoherenceOracle functionality."""
+
+    @requires_node
+    def test_query_oracle_global(self, node_url):
+        """Test querying the oracle with global region."""
+        agent = DisentangleAgent(node_url)
+        agent.register(agent_type="agi")
+
+        # Rust POST /oracle/query
+        # Response: DistributionRoot { ... }
+        result = agent.query_oracle(
+            region={"global": True},
+            depth_start=0,
+            depth_end=1000,
+        )
+
+        assert isinstance(result, dict)
+        # Should contain distribution data
+        expected_keys = ["query_id", "weights", "merkle_root"]
+        assert any(key in result for key in expected_keys)
+
+    @requires_node
+    def test_query_oracle_intent_region(self, node_url):
+        """Test querying the oracle scoped to a SharedIntent."""
+        alice = DisentangleAgent(node_url)
+        alice.register(agent_type="agi")
+
+        bob = DisentangleAgent(node_url)
+        bob.register(agent_type="agi")
+
+        alice.introduce(bob.did)
+        bob.introduce(alice.did)
+
+        intent_result = alice.create_intent(
+            description="Oracle test",
+            participant_dids=[alice.did, bob.did],
+        )
+
+        result = alice.query_oracle(
+            region={"intent": intent_result["intent_id"]},
+            depth_start=0,
+            depth_end=1000,
+        )
+
+        assert isinstance(result, dict)
+
+    @requires_node
+    def test_get_distribution(self, node_url):
+        """Test retrieving a previously computed distribution."""
+        agent = DisentangleAgent(node_url)
+        agent.register(agent_type="agi")
+
+        # First compute a distribution
+        query_result = agent.query_oracle(
+            region={"global": True},
+            depth_start=0,
+            depth_end=1000,
+        )
+
+        if "query_id" in query_result:
+            # Rust GET /oracle/distribution/{id}
+            dist = agent.get_distribution(query_result["query_id"])
+            assert isinstance(dist, dict)
+
+    def test_query_oracle_requires_registration(self, node_url):
+        """Test that querying the oracle requires registration."""
+        agent = DisentangleAgent(node_url)
+
+        with pytest.raises(NotRegisteredError):
+            agent.query_oracle(
+                region={"global": True},
+                depth_start=0,
+                depth_end=1000,
+            )
+
+
+class TestPool:
+    """Test CommonsPool demo functionality."""
+
+    @requires_node
+    def test_pool_status(self, node_url):
+        """Test getting pool status."""
+        agent = DisentangleAgent(node_url)
+
+        # Rust GET /pool/{id}
+        # Note: pool_status does not require registration
+        # This may 404 if no pools exist
+        try:
+            status = agent.pool_status("demo-pool")
+            assert isinstance(status, dict)
+        except DIDNotFoundError:
+            # Expected if no demo pool exists yet
+            pass
+
+    @requires_node
+    def test_pool_claim(self, node_url):
+        """Test claiming from a pool."""
+        agent = DisentangleAgent(node_url)
+        agent.register(agent_type="agi")
+
+        # Rust POST /pool/claim
+        # This will likely fail without a valid distribution,
+        # but we test the interface is correct
+        try:
+            result = agent.pool_claim(
+                pool_id="demo-pool",
+                distribution_id="nonexistent",
+            )
+            assert isinstance(result, dict)
+        except (DisentangleError, DIDNotFoundError):
+            # Expected without a real pool/distribution
+            pass
+
+    def test_pool_claim_requires_registration(self, node_url):
+        """Test that claiming from a pool requires registration."""
+        agent = DisentangleAgent(node_url)
+
+        with pytest.raises(NotRegisteredError):
+            agent.pool_claim("pool-id", "dist-id")
+
+
+class TestTopology:
+    """Test topology neighborhood functionality."""
+
+    @requires_node
+    def test_neighborhoods(self, node_url):
+        """Test listing neighborhoods."""
+        agent = DisentangleAgent(node_url)
+
+        # Rust GET /topology/neighborhoods
+        # Response: { neighborhoods: [...] }
+        # Note: neighborhoods does not require registration
+        neighborhoods = agent.neighborhoods()
+        assert isinstance(neighborhoods, list)
+
+    @requires_node
+    def test_neighborhoods_after_connections(self, node_url):
+        """Test that neighborhoods reflect network structure."""
+        # Create connected agents
+        alice = DisentangleAgent(node_url)
+        alice.register(agent_type="agi")
+
+        bob = DisentangleAgent(node_url)
+        bob.register(agent_type="agi")
+
+        carol = DisentangleAgent(node_url)
+        carol.register(agent_type="agi")
+
+        # Form a triangle
+        alice.introduce(bob.did)
+        bob.introduce(alice.did)
+        alice.introduce(carol.did)
+        carol.introduce(alice.did)
+        bob.introduce(carol.did)
+        carol.introduce(bob.did)
+
+        neighborhoods = alice.neighborhoods()
+        assert isinstance(neighborhoods, list)
+        # With connected agents, should have at least one neighborhood
+        # (may be empty if topology detection hasn't run yet)

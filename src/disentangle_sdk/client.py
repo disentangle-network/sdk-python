@@ -773,3 +773,425 @@ class DisentangleAgent:
             Dictionary with node status info
         """
         return self._request("GET", "/status")
+
+    # -------------------------------------------------------------------------
+    # Proposal Methods
+    # -------------------------------------------------------------------------
+
+    def create_proposal(
+        self,
+        description: str,
+        activation_mass: float,
+        min_participants: int,
+        expiry_depth: int,
+    ) -> dict[str, Any]:
+        """Create a new coordination proposal.
+
+        A Proposal is a potential SharedIntent waiting for sufficient
+        topological mass. Approval is joining; no voting exists.
+
+        Rust RPC: POST /proposal/create
+        Rust RPC: { initiator_did, signing_key_hex, description,
+                     activation_mass, min_participants, expiry_depth }
+        Rust RPC Response: { proposal_id, proposal }
+
+        Args:
+            description: Human-readable description of the proposed coordination
+            activation_mass: Topological mass threshold for activation
+            min_participants: Minimum distinct joiners for diversity requirement
+            expiry_depth: DAG depth at which this expires if not activated
+
+        Returns:
+            Response dict with 'proposal_id' and 'proposal' keys
+
+        Raises:
+            NotRegisteredError: Agent is not registered
+            DisentangleError: Proposal creation failed
+        """
+        if not self.is_registered:
+            raise NotRegisteredError("Agent is not registered. Call register() first.")
+
+        payload = {
+            "initiator_did": self.did,
+            "signing_key_hex": self._signing_key_hex,
+            "description": description,
+            "activation_mass": activation_mass,
+            "min_participants": min_participants,
+            "expiry_depth": expiry_depth,
+        }
+
+        return self._request("POST", "/proposal/create", json=payload)
+
+    def join_proposal(self, proposal_id: str) -> dict[str, Any]:
+        """Join an existing proposal by committing topological mass.
+
+        Rust RPC: POST /proposal/join
+        Rust RPC: { proposal_id, joiner_did, signing_key_hex }
+        Rust RPC Response: { success, committed_mass, total_mass,
+                             activated?, intent_id? }
+
+        Args:
+            proposal_id: Hex-encoded proposal ID to join
+
+        Returns:
+            Response dict with join result. If the join causes activation,
+            the response includes 'activated': True and 'intent_id'.
+
+        Raises:
+            NotRegisteredError: Agent is not registered
+            DisentangleError: Join failed (e.g., proposal expired, coherence too low)
+        """
+        if not self.is_registered:
+            raise NotRegisteredError("Agent is not registered. Call register() first.")
+
+        payload = {
+            "proposal_id": proposal_id,
+            "joiner_did": self.did,
+            "signing_key_hex": self._signing_key_hex,
+        }
+
+        return self._request("POST", "/proposal/join", json=payload)
+
+    def list_proposals(self, status: str | None = None) -> list[dict[str, Any]]:
+        """List proposals, optionally filtered by status.
+
+        Rust RPC: GET /proposal/list?status={status}
+        Rust RPC Response: { proposals: [...] }
+
+        Args:
+            status: Optional status filter ('attracting', 'activated',
+                    'expired', 'archived'). If None, returns all proposals.
+
+        Returns:
+            List of proposal dictionaries
+
+        Raises:
+            NotRegisteredError: Agent is not registered
+        """
+        if not self.is_registered:
+            raise NotRegisteredError("Agent is not registered. Call register() first.")
+
+        params: dict[str, Any] = {}
+        if status is not None:
+            params["status"] = status
+
+        response = self._request("GET", "/proposal/list", params=params)
+        return response.get("proposals", [])
+
+    # -------------------------------------------------------------------------
+    # SharedIntent Methods
+    # -------------------------------------------------------------------------
+
+    def create_intent(
+        self,
+        description: str,
+        participant_dids: list[str],
+        capability_ids: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Create a new SharedIntent for active collaboration.
+
+        A SharedIntent is an active collaboration space with no
+        provider/consumer distinction. The topology IS the outcome
+        measurement.
+
+        Rust RPC: POST /intent/create
+        Rust RPC: { creator_did, signing_key_hex, description,
+                     participant_dids, capability_ids }
+        Rust RPC Response: { intent_id, intent }
+
+        Args:
+            description: Human-readable description of the collaboration
+            participant_dids: List of DIDs for initial participants
+            capability_ids: Optional list of capability hex IDs to contribute
+
+        Returns:
+            Response dict with 'intent_id' and 'intent' keys
+
+        Raises:
+            NotRegisteredError: Agent is not registered
+            DisentangleError: Intent creation failed
+        """
+        if not self.is_registered:
+            raise NotRegisteredError("Agent is not registered. Call register() first.")
+
+        payload: dict[str, Any] = {
+            "creator_did": self.did,
+            "signing_key_hex": self._signing_key_hex,
+            "description": description,
+            "participant_dids": participant_dids,
+        }
+
+        if capability_ids is not None:
+            payload["capability_ids"] = capability_ids
+
+        return self._request("POST", "/intent/create", json=payload)
+
+    def join_intent(
+        self,
+        intent_id: str,
+        capability_ids: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Join an active SharedIntent.
+
+        Late joining is supported. Requires CoherenceMinimum and at
+        least one existing participant to have a positive-curvature
+        edge with the joiner.
+
+        Rust RPC: POST /intent/join
+        Rust RPC: { intent_id, joiner_did, signing_key_hex, capability_ids }
+        Rust RPC Response: { success, participant }
+
+        Args:
+            intent_id: Hex-encoded SharedIntent ID to join
+            capability_ids: Optional list of capability hex IDs to contribute
+
+        Returns:
+            Response dict with join result
+
+        Raises:
+            NotRegisteredError: Agent is not registered
+            DisentangleError: Join failed (e.g., coherence too low, no path)
+        """
+        if not self.is_registered:
+            raise NotRegisteredError("Agent is not registered. Call register() first.")
+
+        payload: dict[str, Any] = {
+            "intent_id": intent_id,
+            "joiner_did": self.did,
+            "signing_key_hex": self._signing_key_hex,
+        }
+
+        if capability_ids is not None:
+            payload["capability_ids"] = capability_ids
+
+        return self._request("POST", "/intent/join", json=payload)
+
+    def archive_intent(self, intent_id: str) -> dict[str, Any]:
+        """Archive a SharedIntent, snapshotting coherence deltas.
+
+        On archival, the protocol snapshots mass delta and curvature
+        delta among participants. These deltas ARE the outcome --
+        no attestation needed.
+
+        Rust RPC: POST /intent/archive
+        Rust RPC: { intent_id, archiver_did, signing_key_hex }
+        Rust RPC Response: { success, mass_delta, curvature_delta }
+
+        Args:
+            intent_id: Hex-encoded SharedIntent ID to archive
+
+        Returns:
+            Response dict with archive result including coherence deltas
+
+        Raises:
+            NotRegisteredError: Agent is not registered
+            DisentangleError: Archive failed
+        """
+        if not self.is_registered:
+            raise NotRegisteredError("Agent is not registered. Call register() first.")
+
+        payload = {
+            "intent_id": intent_id,
+            "archiver_did": self.did,
+            "signing_key_hex": self._signing_key_hex,
+        }
+
+        return self._request("POST", "/intent/archive", json=payload)
+
+    def intent_coherence(self, intent_id: str) -> dict[str, Any]:
+        """Get a coherence snapshot for a SharedIntent.
+
+        Returns the current mass delta, curvature delta, and per-participant
+        metrics relative to the intent's baseline.
+
+        Rust RPC: GET /intent/{id}/coherence
+        Rust RPC Response: IntentCoherenceSnapshot {
+            intent_id, participant_count, baseline_mass, current_mass,
+            mass_delta, baseline_curvature, current_curvature,
+            curvature_delta, depth
+        }
+
+        Args:
+            intent_id: Hex-encoded SharedIntent ID
+
+        Returns:
+            Dict with coherence snapshot metrics
+
+        Raises:
+            NotRegisteredError: Agent is not registered
+            DIDNotFoundError: Intent not found
+        """
+        if not self.is_registered:
+            raise NotRegisteredError("Agent is not registered. Call register() first.")
+
+        return self._request("GET", f"/intent/{intent_id}/coherence")
+
+    def list_intents(self, status: str | None = None) -> list[dict[str, Any]]:
+        """List SharedIntents, optionally filtered by status.
+
+        Rust RPC: GET /intent/list?status={status}
+        Rust RPC Response: { intents: [...] }
+
+        Args:
+            status: Optional status filter ('active', 'archived').
+                    If None, returns all intents.
+
+        Returns:
+            List of SharedIntent dictionaries
+
+        Raises:
+            NotRegisteredError: Agent is not registered
+        """
+        if not self.is_registered:
+            raise NotRegisteredError("Agent is not registered. Call register() first.")
+
+        params: dict[str, Any] = {}
+        if status is not None:
+            params["status"] = status
+
+        response = self._request("GET", "/intent/list", params=params)
+        return response.get("intents", [])
+
+    # -------------------------------------------------------------------------
+    # Oracle Methods
+    # -------------------------------------------------------------------------
+
+    def query_oracle(
+        self,
+        region: dict[str, Any],
+        depth_start: int,
+        depth_end: int,
+    ) -> dict[str, Any]:
+        """Query the CoherenceOracle for a distribution computation.
+
+        The oracle exposes the protocol's coherence computation as a
+        deterministic, auditable external API. Anyone can recompute
+        from DAG state.
+
+        Rust RPC: POST /oracle/query
+        Rust RPC: OracleQuery { region, depth_start, depth_end }
+        Rust RPC Response: DistributionRoot {
+            query_id, region, depth_window, weights, scores,
+            merkle_root, computed_at_depth
+        }
+
+        Args:
+            region: Region selector dict. Supported forms:
+                    {"neighborhood": "<hash>"}
+                    {"intent": "<intent_id_hex>"}
+                    {"explicit": ["did:...", "did:..."]}
+                    {"global": true}
+            depth_start: Start of the depth window for evaluation
+            depth_end: End of the depth window for evaluation
+
+        Returns:
+            DistributionRoot dict with per-agent weights and scores
+
+        Raises:
+            NotRegisteredError: Agent is not registered
+            DisentangleError: Oracle query failed
+        """
+        if not self.is_registered:
+            raise NotRegisteredError("Agent is not registered. Call register() first.")
+
+        payload = {
+            "region": region,
+            "depth_start": depth_start,
+            "depth_end": depth_end,
+        }
+
+        return self._request("POST", "/oracle/query", json=payload)
+
+    def get_distribution(self, distribution_id: str) -> dict[str, Any]:
+        """Retrieve a previously computed distribution.
+
+        Rust RPC: GET /oracle/distribution/{id}
+        Rust RPC Response: DistributionRoot { ... }
+
+        Args:
+            distribution_id: Hex-encoded distribution/query ID
+
+        Returns:
+            DistributionRoot dict
+
+        Raises:
+            DIDNotFoundError: Distribution not found
+        """
+        return self._request("GET", f"/oracle/distribution/{distribution_id}")
+
+    # -------------------------------------------------------------------------
+    # Pool Methods (Demo)
+    # -------------------------------------------------------------------------
+
+    def pool_status(self, pool_id: str) -> dict[str, Any]:
+        """Get the status of a CommonsPool.
+
+        Rust RPC: GET /pool/{id}
+        Rust RPC Response: CommonsPool { id, name, balance, min_coherence,
+                           active_distribution, deposits, claims }
+
+        Args:
+            pool_id: Hex-encoded pool ID
+
+        Returns:
+            Pool state dictionary
+
+        Raises:
+            DIDNotFoundError: Pool not found
+        """
+        return self._request("GET", f"/pool/{pool_id}")
+
+    def pool_claim(self, pool_id: str, distribution_id: str) -> dict[str, Any]:
+        """Claim an allocation from a CommonsPool.
+
+        Requires a valid distribution that includes this agent and
+        CoherenceMinimum met.
+
+        Rust RPC: POST /pool/claim
+        Rust RPC: { pool_id, distribution_id, claimant_did, signing_key_hex }
+        Rust RPC Response: { success, amount, claim }
+
+        Args:
+            pool_id: Hex-encoded pool ID
+            distribution_id: Hex-encoded distribution ID (from oracle query)
+
+        Returns:
+            Response dict with claim result including amount
+
+        Raises:
+            NotRegisteredError: Agent is not registered
+            DisentangleError: Claim failed (e.g., not in distribution,
+                              coherence too low)
+        """
+        if not self.is_registered:
+            raise NotRegisteredError("Agent is not registered. Call register() first.")
+
+        payload = {
+            "pool_id": pool_id,
+            "distribution_id": distribution_id,
+            "claimant_did": self.did,
+            "signing_key_hex": self._signing_key_hex,
+        }
+
+        return self._request("POST", "/pool/claim", json=payload)
+
+    # -------------------------------------------------------------------------
+    # Topology Methods
+    # -------------------------------------------------------------------------
+
+    def neighborhoods(self) -> list[dict[str, Any]]:
+        """List current neighborhoods with mass and curvature summaries.
+
+        Neighborhoods are connected components of the identity graph
+        where all edges have weight >= W_MIN. They are ephemeral
+        computed views, not stored entities.
+
+        Rust RPC: GET /topology/neighborhoods
+        Rust RPC Response: { neighborhoods: [...] }
+
+        Returns:
+            List of neighborhood summary dictionaries, each containing
+            cluster hash, member count, total mass, mean curvature, etc.
+        """
+        response = self._request("GET", "/topology/neighborhoods")
+        return response.get("neighborhoods", [])
