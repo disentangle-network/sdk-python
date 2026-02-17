@@ -1,7 +1,8 @@
 """DisentangleAgent client for interacting with a Disentangle node."""
 
 import httpx
-from typing import Any
+import json
+from typing import Any, Iterator, Callable
 
 from .types import AgentIdentity, CapabilityHandle, CoherenceReport
 from .exceptions import (
@@ -541,11 +542,232 @@ class DisentangleAgent:
             return None
 
     # -------------------------------------------------------------------------
+    # Service Agreement Methods
+    # -------------------------------------------------------------------------
+
+    def propose_agreement(
+        self,
+        consumer_did: str,
+        description: str,
+        success_criteria: list[str],
+        deadline_depth: int | None = None,
+    ) -> dict[str, Any]:
+        """Propose a service agreement where this agent is the provider.
+
+        Rust RPC: POST /agreement/propose
+        Rust RPC: { provider_did, consumer_did, terms, signing_key_hex }
+        Rust RPC Response: { agreement_id, agreement }
+
+        Args:
+            consumer_did: DID of the consumer agent
+            description: Human-readable description of the service
+            success_criteria: List of success criteria strings
+            deadline_depth: Optional deadline as DAG depth
+
+        Returns:
+            Response dict with 'agreement_id' and 'agreement' keys
+
+        Raises:
+            NotRegisteredError: Agent is not registered
+            DisentangleError: Agreement proposal failed
+        """
+        if not self.is_registered:
+            raise NotRegisteredError("Agent is not registered. Call register() first.")
+
+        payload = {
+            "provider_did": self.did,
+            "consumer_did": consumer_did,
+            "terms": {
+                "description": description,
+                "success_criteria": success_criteria,
+                "deadline_depth": deadline_depth,
+            },
+            "signing_key_hex": self._signing_key_hex,
+        }
+
+        return self._request("POST", "/agreement/propose", json=payload)
+
+    def accept_agreement(self, agreement_id: str) -> bool:
+        """Accept a proposed service agreement where this agent is the consumer.
+
+        Rust RPC: POST /agreement/accept
+        Rust RPC: { agreement_id, consumer_sk_hex }
+        Rust RPC Response: { success }
+
+        Args:
+            agreement_id: Hex-encoded agreement ID
+
+        Returns:
+            True if acceptance succeeded
+
+        Raises:
+            NotRegisteredError: Agent is not registered
+            DisentangleError: Agreement acceptance failed
+        """
+        if not self.is_registered:
+            raise NotRegisteredError("Agent is not registered. Call register() first.")
+
+        payload = {
+            "agreement_id": agreement_id,
+            "consumer_sk_hex": self._signing_key_hex,
+        }
+
+        response = self._request("POST", "/agreement/accept", json=payload)
+        return response.get("success", False)
+
+    def complete_agreement(
+        self, agreement_id: str, success: bool, outcome_hash: str
+    ) -> bool:
+        """Mark a service agreement as completed.
+
+        Rust RPC: POST /agreement/complete
+        Rust RPC: { agreement_id, success, outcome_hash, signing_key_hex }
+        Rust RPC Response: { success }
+
+        Args:
+            agreement_id: Hex-encoded agreement ID
+            success: Whether the agreement completed successfully
+            outcome_hash: Hash of the outcome/deliverable
+
+        Returns:
+            True if completion succeeded
+
+        Raises:
+            NotRegisteredError: Agent is not registered
+            DisentangleError: Agreement completion failed
+        """
+        if not self.is_registered:
+            raise NotRegisteredError("Agent is not registered. Call register() first.")
+
+        payload = {
+            "agreement_id": agreement_id,
+            "success": success,
+            "outcome_hash": outcome_hash,
+            "signing_key_hex": self._signing_key_hex,
+        }
+
+        response = self._request("POST", "/agreement/complete", json=payload)
+        return response.get("success", False)
+
+    def list_agreements(self) -> list[dict[str, Any]]:
+        """List all service agreements involving this agent.
+
+        Rust RPC: GET /agreement/by-did/{did}
+        Rust RPC Response: { agreements: [...] }
+
+        Returns:
+            List of agreement dictionaries
+
+        Raises:
+            NotRegisteredError: Agent is not registered
+        """
+        if not self.is_registered:
+            raise NotRegisteredError("Agent is not registered. Call register() first.")
+
+        response = self._request("GET", f"/agreement/by-did/{self.did}")
+        return response.get("agreements", [])
+
+    # -------------------------------------------------------------------------
+    # Event Watching Methods
+    # -------------------------------------------------------------------------
+
+    def watch(
+        self,
+        topics: list[str] | None = None,
+        callback: Any = None,
+    ):
+        """Subscribe to Server-Sent Events (SSE) from the node.
+
+        Rust RPC: GET /watch?topics=delegation,agreement,coherence,introduction&did={did}
+        Rust RPC: Returns SSE stream with events as JSON
+
+        Args:
+            topics: Optional list of event topics to filter:
+                   ['delegation', 'agreement', 'coherence', 'introduction', 'transaction']
+                   If None, receives all event types.
+            callback: Optional function to call for each event.
+                     If provided, blocks and calls callback(event_dict).
+                     If None, returns an iterator that yields events.
+
+        Returns:
+            Iterator[dict] if callback is None
+            None if callback is provided (blocks until stream ends)
+
+        Raises:
+            NodeConnectionError: Cannot connect to node
+            NotRegisteredError: Agent is not registered
+
+        Example:
+            # Iterator style
+            for event in agent.watch(topics=['delegation']):
+                print(f"Event: {event}")
+
+            # Callback style
+            def handle_event(event):
+                print(f"Received: {event['type']}")
+            agent.watch(topics=['agreement'], callback=handle_event)
+        """
+        if not self.is_registered:
+            raise NotRegisteredError("Agent is not registered. Call register() first.")
+
+        # Build query parameters
+        params: dict[str, str] = {"did": self.did}
+        if topics:
+            params["topics"] = ",".join(topics)
+
+        try:
+            # Use httpx.stream for Server-Sent Events
+            with self._client.stream("GET", "/watch", params=params) as response:
+                response.raise_for_status()
+
+                # Process SSE stream line by line
+                for line in response.iter_lines():
+                    # SSE format: lines starting with "data: " contain JSON
+                    if line.startswith("data: "):
+                        event_json = line[6:]  # Strip "data: " prefix
+                        try:
+                            event = json.loads(event_json)
+                            if callback:
+                                callback(event)
+                            else:
+                                yield event
+                        except json.JSONDecodeError:
+                            # Skip malformed JSON (e.g., keepalive messages)
+                            continue
+
+        except httpx.ConnectError as e:
+            raise NodeConnectionError(f"Cannot connect to node: {e}")
+        except httpx.TimeoutException as e:
+            raise NodeConnectionError(f"Request timeout: {e}")
+        except httpx.HTTPError as e:
+            raise NodeConnectionError(f"HTTP error: {e}")
+
+    # -------------------------------------------------------------------------
     # Node Info Methods
     # -------------------------------------------------------------------------
 
+    def network_health(self) -> dict[str, Any]:
+        """Get enriched network health metrics.
+
+        Rust RPC: GET /network/health
+        Rust RPC Response: {
+            node_id, peer_count, dag_size, current_depth, tips,
+            registered_dids, active_capabilities, active_agreements,
+            mean_network_curvature, identity_graph_edges, uptime_seconds
+        }
+
+        Returns:
+            Dictionary with network health metrics
+
+        Example:
+            health = agent.network_health()
+            print(f"Network has {health['registered_dids']} DIDs")
+            print(f"Mean curvature: {health['mean_network_curvature']}")
+        """
+        return self._request("GET", "/network/health")
+
     def node_status(self) -> dict[str, Any]:
-        """Get node status information.
+        """Get basic node status information.
 
         Returns:
             Dictionary with node status info
