@@ -489,6 +489,93 @@ class DisentangleAgent:
         return response.get("neighbors", [])
 
     # -------------------------------------------------------------------------
+    # Gradient (Excitability) Methods
+    # -------------------------------------------------------------------------
+
+    def curvature_derivative(
+        self, did_a: str, did_b: str, window: int = 100
+    ) -> dict[str, Any]:
+        """Get the curvature derivative for a specific edge.
+
+        The curvature derivative measures how fast curvature is changing
+        on the edge between two agents over a sliding depth window.
+        Positive values indicate strengthening coherence; negative
+        values indicate decay.
+
+        Rust RPC: GET /coherence/gradient/{did_a}/{did_b}?window={window}
+        Rust RPC Response: CurvatureDerivative { ... }
+
+        Args:
+            did_a: DID of the first agent
+            did_b: DID of the second agent
+            window: Depth window for derivative computation (default 100)
+
+        Returns:
+            CurvatureDerivative dict with edge gradient data
+
+        Raises:
+            DIDNotFoundError: One or both DIDs not found
+        """
+        return self._request(
+            "GET",
+            f"/coherence/gradient/{did_a}/{did_b}",
+            params={"window": window},
+        )
+
+    def excitability(self, did: str, window: int = 100) -> dict[str, Any]:
+        """Get the excitability profile for an agent.
+
+        Excitability captures how responsive an agent's local topology
+        is to perturbation -- essentially the second derivative of
+        coherence. High excitability means small actions produce large
+        curvature shifts.
+
+        Rust RPC: GET /coherence/excitability/{did}?window={window}
+        Rust RPC Response: ExcitabilityProfile { ... }
+
+        Args:
+            did: DID of the agent to query
+            window: Depth window for excitability computation (default 100)
+
+        Returns:
+            ExcitabilityProfile dict with per-agent excitability data
+
+        Raises:
+            DIDNotFoundError: DID not found
+        """
+        return self._request(
+            "GET",
+            f"/coherence/excitability/{did}",
+            params={"window": window},
+        )
+
+    def gradient_map(self, top_n: int = 20, window: int = 100) -> dict[str, Any]:
+        """Get the network-level coherence gradient map.
+
+        Returns the top-N edges by absolute curvature derivative,
+        giving a snapshot of where coherence is changing fastest
+        across the entire network.
+
+        Rust RPC: GET /coherence/gradient/map?top_n={top_n}&window={window}
+        Rust RPC Response: CoherenceGradientMap { ... }
+
+        Args:
+            top_n: Number of top edges to return (default 20)
+            window: Depth window for derivative computation (default 100)
+
+        Returns:
+            CoherenceGradientMap dict with ranked edge gradients
+
+        Raises:
+            DisentangleError: Query failed
+        """
+        return self._request(
+            "GET",
+            "/coherence/gradient/map",
+            params={"top_n": top_n, "window": window},
+        )
+
+    # -------------------------------------------------------------------------
     # Petname Methods
     # -------------------------------------------------------------------------
 
@@ -1117,6 +1204,18 @@ class DisentangleAgent:
         """
         return self._request("GET", f"/oracle/distribution/{distribution_id}")
 
+    def list_distributions(self) -> list[dict[str, Any]]:
+        """List all previously computed distributions.
+
+        Rust RPC: GET /oracle/distributions
+        Rust RPC Response: { distributions: [...] }
+
+        Returns:
+            List of DistributionRoot dictionaries
+        """
+        response = self._request("GET", "/oracle/distributions")
+        return response.get("distributions", [])
+
     # -------------------------------------------------------------------------
     # Pool Methods (Demo)
     # -------------------------------------------------------------------------
@@ -1172,6 +1271,125 @@ class DisentangleAgent:
         }
 
         return self._request("POST", "/pool/claim", json=payload)
+
+    def create_pool(self, name: str, description: str = "") -> dict[str, Any]:
+        """Create a new CommonsPool.
+
+        A CommonsPool holds fungible value and distributes it to agents
+        based on oracle-computed coherence weights.
+
+        Rust RPC: POST /pool/create
+        Rust RPC: { name, description, creator_did, signing_key_hex }
+        Rust RPC Response: CommonsPool { id, name, balance, ... }
+
+        Args:
+            name: Human-readable pool name
+            description: Optional description of the pool's purpose
+
+        Returns:
+            CommonsPool dict with pool metadata
+
+        Raises:
+            NotRegisteredError: Agent is not registered
+            DisentangleError: Pool creation failed
+        """
+        if not self.is_registered:
+            raise NotRegisteredError("Agent is not registered. Call register() first.")
+
+        payload = {
+            "name": name,
+            "description": description,
+            "creator_did": self.did,
+            "signing_key_hex": self._signing_key_hex,
+        }
+
+        return self._request("POST", "/pool/create", json=payload)
+
+    def pool_deposit(
+        self, pool_id: str, amount: float, source: str = ""
+    ) -> dict[str, Any]:
+        """Deposit value into a CommonsPool.
+
+        Rust RPC: POST /pool/deposit
+        Rust RPC: { pool_id, amount, source, depositor_did, signing_key_hex }
+        Rust RPC Response: { success, new_balance, deposit }
+
+        Args:
+            pool_id: Hex-encoded pool ID
+            amount: Amount to deposit
+            source: Optional label for the deposit source
+
+        Returns:
+            Response dict with deposit confirmation and new balance
+
+        Raises:
+            NotRegisteredError: Agent is not registered
+            DisentangleError: Deposit failed
+        """
+        if not self.is_registered:
+            raise NotRegisteredError("Agent is not registered. Call register() first.")
+
+        payload = {
+            "pool_id": pool_id,
+            "amount": amount,
+            "source": source,
+            "depositor_did": self.did,
+            "signing_key_hex": self._signing_key_hex,
+        }
+
+        return self._request("POST", "/pool/deposit", json=payload)
+
+    def pool_distribute(self, pool_id: str, distribution_id: str) -> dict[str, Any]:
+        """Trigger distribution from a pool using oracle results.
+
+        Applies a previously computed DistributionRoot to allocate
+        pool funds to participants proportional to their coherence
+        weights.
+
+        Rust RPC: POST /pool/distribute
+        Rust RPC: { pool_id, distribution_id, initiator_did, signing_key_hex }
+        Rust RPC Response: { success, allocations, remaining_balance }
+
+        Args:
+            pool_id: Hex-encoded pool ID
+            distribution_id: Hex-encoded distribution ID from oracle query
+
+        Returns:
+            Response dict with distribution result and allocations
+
+        Raises:
+            NotRegisteredError: Agent is not registered
+            DisentangleError: Distribution failed
+        """
+        if not self.is_registered:
+            raise NotRegisteredError("Agent is not registered. Call register() first.")
+
+        payload = {
+            "pool_id": pool_id,
+            "distribution_id": distribution_id,
+            "initiator_did": self.did,
+            "signing_key_hex": self._signing_key_hex,
+        }
+
+        return self._request("POST", "/pool/distribute", json=payload)
+
+    def pool_claims(self, pool_id: str) -> list[dict[str, Any]]:
+        """List all claims for a CommonsPool.
+
+        Rust RPC: GET /pool/{id}/claims
+        Rust RPC Response: { claims: [...] }
+
+        Args:
+            pool_id: Hex-encoded pool ID
+
+        Returns:
+            List of claim dictionaries
+
+        Raises:
+            DIDNotFoundError: Pool not found
+        """
+        response = self._request("GET", f"/pool/{pool_id}/claims")
+        return response.get("claims", [])
 
     # -------------------------------------------------------------------------
     # Topology Methods
