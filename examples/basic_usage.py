@@ -48,7 +48,7 @@ def main():
     print("\nIntroducing agents...")
     result1 = agent.introduce(peer.did, edge_name="collaborator")
     result2 = peer.introduce(agent.did, edge_name="collaborator")
-    print(f"Mutual introduction complete")
+    print("Mutual introduction complete")
     print(f"  agent -> peer: {'OK' if result1 else 'FAILED'}")
     print(f"  peer -> agent: {'OK' if result2 else 'FAILED'}")
 
@@ -65,7 +65,7 @@ def main():
 
     # Delegate capability to peer
     print("\nDelegating capability to peer...")
-    delegation = agent.delegate(capability.capability_id_hex, peer.did)
+    agent.delegate(capability.capability_id_hex, peer.did)
     print("Delegation successful")
 
     # Peer invokes capability
@@ -99,4 +99,5 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"\n✗ Error: {e}")
         import traceback
+
         traceback.print_exc()
