@@ -2,7 +2,7 @@
 
 import httpx
 import json
-from typing import Any, Iterator, Callable
+from typing import Any
 
 from .types import AgentIdentity, CapabilityHandle, CoherenceReport
 from .exceptions import (
@@ -404,9 +404,7 @@ class DisentangleAgent:
         if not self.is_registered:
             raise NotRegisteredError("Agent is not registered. Call register() first.")
 
-        response = self._request(
-            "GET", f"/introduction/chain/{self.did}/{to_did}"
-        )
+        response = self._request("GET", f"/introduction/chain/{self.did}/{to_did}")
         return response.get("chain", [])
 
     # -------------------------------------------------------------------------

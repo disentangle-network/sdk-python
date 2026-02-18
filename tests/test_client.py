@@ -7,6 +7,7 @@ unless DISENTANGLE_NODE_URL is set, which should point to a running node.
 import pytest
 from disentangle_sdk import (
     DisentangleAgent,
+    DisentangleError,
     AgentIdentity,
     CapabilityHandle,
     CoherenceReport,
@@ -633,7 +634,7 @@ class TestProposals:
         proposal_id = result["proposal_id"]
 
         # Bob joins
-        join_result = bob.join_proposal(proposal_id)
+        bob.join_proposal(proposal_id)
 
         # Carol joins — may trigger activation
         join_result2 = carol.join_proposal(proposal_id)
