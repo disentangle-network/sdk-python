@@ -177,7 +177,7 @@ with DisentangleAgent("http://localhost:8000") as agent:
 
 ## License
 
-MIT
+Apache-2.0
 
 ## See Also
 
