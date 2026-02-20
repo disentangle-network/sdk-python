@@ -1,0 +1,13 @@
+[run]
+source = src/disentangle_sdk
+omit =
+    */__pycache__/*
+    */tests/*
+
+[report]
+show_missing = true
+fail_under = 60
+exclude_lines =
+    pragma: no cover
+    if __name__
+    raise NotImplementedError
