@@ -1,5 +1,7 @@
 # Disentangle SDK (Python)
 
+[![CI](https://github.com/disentangle-network/sdk-python/actions/workflows/ci.yml/badge.svg)](https://github.com/disentangle-network/sdk-python/actions/workflows/ci.yml) [![codecov](https://codecov.io/gh/disentangle-network/sdk-python/branch/main/graph/badge.svg)](https://codecov.io/gh/disentangle-network/sdk-python) [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+
 Python client library for the Disentangle Protocol - a decentralized identity and capability system with sybil resistance through topological coherence.
 
 ## Installation
