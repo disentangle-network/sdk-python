@@ -6,35 +6,153 @@ on:
   pull_request:
     branches: [main, develop]
 
-jobs:
-  lint-and-test:
-    runs-on: ubuntu-latest
+permissions:
+  contents: read
 
+jobs:
+  lint:
+    runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v4
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v7
+        uses: astral-sh/setup-uv@v4
 
-      - name: Install Python
-        run: uv python install $(cat .python-version)
+      - name: Set up Python
+        run: uv python install
 
       - name: Install dependencies
         run: uv sync --dev
 
-      - name: Lint
+      - name: Run ruff check
         run: uv run ruff check .
 
-      - name: Check formatting
+      - name: Run ruff format check
         run: uv run ruff format --check .
+
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Set up Python
+        run: uv python install
+
+      - name: Install dependencies
+        run: uv sync --dev
+
+      - name: Install mypy
+        run: uv pip install mypy
+
+      - name: Run mypy
+        run: uv run mypy src/disentangle_sdk --ignore-missing-imports
+
+  security:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Set up Python
+        run: uv python install
+
+      - name: Install dependencies
+        run: uv sync --dev
+
+      - name: Run pip-audit
+        run: |
+          uv pip install pip-audit
+          uv run pip-audit
+
+      - name: Run safety check
+        run: |
+          uv pip install safety
+          uv run safety check --full-report || true
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        run: uv python install ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: uv sync --dev
 
       - name: Run tests with coverage
         run: uv run pytest -v --cov=src/disentangle_sdk --cov-report=xml --cov-report=term-missing
 
       - name: Upload coverage to Codecov
-        if: always()
+        if: matrix.python-version == '3.13'
         uses: codecov/codecov-action@v4
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: coverage.xml
           fail_ci_if_error: false
+
+  build:
+    name: Build Package
+    runs-on: ubuntu-latest
+    needs: [test, lint, typecheck]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Set up Python
+        run: uv python install
+
+      - name: Build package
+        run: uv build
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  lint-and-test:
+    name: lint-and-test
+    runs-on: ubuntu-latest
+    needs: [lint, typecheck, security, test, build]
+    if: always()
+    steps:
+      - name: Check all jobs passed
+        run: |
+          if [[ "${{ needs.lint.result }}" != "success" ]]; then
+            echo "lint job failed"
+            exit 1
+          fi
+          if [[ "${{ needs.typecheck.result }}" != "success" ]]; then
+            echo "typecheck job failed"
+            exit 1
+          fi
+          if [[ "${{ needs.security.result }}" != "success" ]]; then
+            echo "security job failed"
+            exit 1
+          fi
+          if [[ "${{ needs.test.result }}" != "success" ]]; then
+            echo "test job failed"
+            exit 1
+          fi
+          if [[ "${{ needs.build.result }}" != "success" ]]; then
+            echo "build job failed"
+            exit 1
+          fi
+          echo "All jobs passed"
