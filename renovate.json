@@ -1,0 +1,20 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended"],
+  "packageRules": [
+    {
+      "matchManagers": ["pep621"],
+      "matchUpdateTypes": ["minor", "patch"],
+      "automerge": true
+    }
+  ],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "fileMatch": ["^\\.python-version$"],
+      "matchStrings": ["(?<currentValue>\\d+\\.\\d+(\\.\\d+)?)\\n"],
+      "datasourceTemplate": "python-version",
+      "depNameTemplate": "python"
+    }
+  ]
+}
